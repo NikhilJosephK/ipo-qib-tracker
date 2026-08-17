@@ -3,21 +3,47 @@ import os
 import re
 import time
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
 
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+MIN_LOT_COST = 15000.0
+MAX_LOT_COST = 20000.0
+MIN_QIB_SUBSCRIPTION = 10.0
+
+INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 BASE_URL = "https://www.nseindia.com"
 IPO_LIST_URL = "https://www.nseindia.com/api/ipo-current-issue"
 IPO_DETAIL_URL = "https://www.nseindia.com/api/ipo-detail"
 
-LOT_SIZE_PATTERN = re.compile(r"([\d,]+)\s+Equity Shares")
+
+# ============================================================
+# REGEX
+# ============================================================
+
+LOT_SIZE_PATTERN = re.compile(
+    r"([\d,]+)\s+Equity Shares"
+)
+
 PRICE_RANGE_PATTERN = re.compile(
-    r"Rs\.?\s*([\d,]+(?:\.\d+)?)\s+to\s+Rs\.?\s*([\d,]+(?:\.\d+)?)"
+    r"Rs\.?\s*([\d,]+(?:\.\d+)?)"
+    r"\s+to\s+"
+    r"Rs\.?\s*([\d,]+(?:\.\d+)?)"
 )
 
 
+# ============================================================
+# NSE SCRAPER
+# ============================================================
+
 class NSEIPOScraper:
+
     def __init__(self):
         self.session = requests.Session()
 
@@ -28,81 +54,178 @@ class NSEIPOScraper:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "application/json, text/plain, */*",
-                "Referer": "https://www.nseindia.com/",
+                "Accept": (
+                    "application/json, text/plain, */*"
+                ),
+                "Accept-Language": (
+                    "en-US,en;q=0.9"
+                ),
+                "Referer": (
+                    "https://www.nseindia.com/"
+                ),
+                "Connection": "keep-alive",
             }
         )
 
         self._refresh_cookies()
 
     def _refresh_cookies(self):
-        """Initialize NSE session cookies."""
-        try:
-            response = self.session.get(BASE_URL, timeout=15)
-            print(f"NSE homepage: {response.status_code}")
-        except Exception as e:
-            print(f"Cookie refresh warning: {e}")
 
-    def _get(self, url: str, params=None, retries: int = 3):
-        """GET request with retry handling."""
-        for attempt in range(retries):
+        print("Initializing NSE session...")
+
+        try:
+            response = self.session.get(
+                BASE_URL,
+                timeout=15,
+            )
+
+            print(
+                f"NSE homepage response: "
+                f"{response.status_code}"
+            )
+
+        except requests.RequestException as e:
+
+            print(
+                f"NSE homepage request failed: {e}"
+            )
+
+    def _get(
+        self,
+        url: str,
+        params: Optional[Dict] = None,
+        retries: int = 3,
+    ):
+
+        for attempt in range(1, retries + 1):
+
             try:
+
                 response = self.session.get(
                     url,
                     params=params,
-                    timeout=15,
+                    timeout=20,
+                )
+
+                print(
+                    f"GET {url} "
+                    f"-> {response.status_code} "
+                    f"(attempt {attempt}/{retries})"
                 )
 
                 if response.status_code == 200:
                     return response
 
-                print(
-                    f"Request failed: {response.status_code} "
-                    f"(attempt {attempt + 1}/{retries})"
-                )
+                if response.status_code == 403:
 
-                if response.status_code in (403, 429):
+                    print(
+                        "NSE returned 403. "
+                        "Refreshing cookies..."
+                    )
+
                     self._refresh_cookies()
 
+                if response.status_code == 429:
+
+                    print(
+                        "NSE rate limit detected."
+                    )
+
+                if attempt < retries:
+
+                    sleep_time = attempt * 2
+
+                    print(
+                        f"Retrying in "
+                        f"{sleep_time} seconds..."
+                    )
+
+                    time.sleep(sleep_time)
+
             except requests.RequestException as e:
+
                 print(
                     f"Request error: {e} "
-                    f"(attempt {attempt + 1}/{retries})"
+                    f"(attempt {attempt}/{retries})"
                 )
 
-            time.sleep(2 * (attempt + 1))
+                if attempt < retries:
+                    time.sleep(attempt * 2)
+
+        print(
+            f"Request failed after "
+            f"{retries} attempts: {url}"
+        )
 
         return None
 
     def fetch_active_ipos(self) -> List[Dict]:
-        """Fetch all current IPO issues."""
-        response = self._get(IPO_LIST_URL)
 
-        if not response:
-            return []
+        print("\nFetching active IPOs...")
 
-        try:
-            data = response.json()
-            return data if isinstance(data, list) else []
-        except Exception as e:
-            print(f"Failed to parse IPO list: {e}")
-            return []
-
-    def fetch_bid_details(self, symbol: str) -> List[Dict]:
-        """Fetch category-wise subscription details."""
         response = self._get(
-            IPO_DETAIL_URL,
-            params={"symbol": symbol},
+            IPO_LIST_URL
         )
 
         if not response:
             return []
 
         try:
-            return response.json().get("bidDetails", [])
+
+            data = response.json()
+
+            if isinstance(data, list):
+
+                print(
+                    f"Active IPOs found: "
+                    f"{len(data)}"
+                )
+
+                return data
+
+            print(
+                "Unexpected IPO list response."
+            )
+
+            return []
+
         except Exception as e:
-            print(f"Failed to parse bid details for {symbol}: {e}")
+
+            print(
+                f"Failed to parse IPO list: {e}"
+            )
+
+            return []
+
+    def fetch_bid_details(
+        self,
+        symbol: str,
+    ) -> List[Dict]:
+
+        response = self._get(
+            IPO_DETAIL_URL,
+            params={
+                "symbol": symbol
+            },
+        )
+
+        if not response:
+            return []
+
+        try:
+
+            return response.json().get(
+                "bidDetails",
+                [],
+            )
+
+        except Exception as e:
+
+            print(
+                f"Failed to parse bid details "
+                f"for {symbol}: {e}"
+            )
+
             return []
 
     def fetch_issue_info(
@@ -110,8 +233,10 @@ class NSEIPOScraper:
         symbol: str,
         series: str,
     ) -> List[Dict]:
-        """Fetch lot size and price information."""
-        params = {"symbol": symbol}
+
+        params = {
+            "symbol": symbol
+        }
 
         if series.upper() == "SME":
             params["series"] = "SME"
@@ -125,28 +250,51 @@ class NSEIPOScraper:
             return []
 
         try:
+
             return (
                 response.json()
                 .get("issueInfo", {})
                 .get("dataList", [])
             )
+
         except Exception as e:
-            print(f"Failed to parse issue info for {symbol}: {e}")
+
+            print(
+                f"Failed to parse issue info "
+                f"for {symbol}: {e}"
+            )
+
             return []
 
+
+# ============================================================
+# PARSING
+# ============================================================
 
 def parse_lot_size(
     issue_info_fields: List[Dict],
 ) -> Optional[int]:
+
     for field in issue_info_fields:
-        if field.get("title") in ("Bid Lot", "Lot Size"):
+
+        if field.get("title") in (
+            "Bid Lot",
+            "Lot Size",
+        ):
+
+            value = field.get(
+                "value"
+            ) or ""
+
             match = LOT_SIZE_PATTERN.search(
-                field.get("value") or ""
+                value
             )
 
             if match:
+
                 return int(
-                    match.group(1).replace(",", "")
+                    match.group(1)
+                    .replace(",", "")
                 )
 
     return None
@@ -155,15 +303,24 @@ def parse_lot_size(
 def parse_cut_off_price(
     issue_info_fields: List[Dict],
 ) -> Optional[float]:
+
     for field in issue_info_fields:
+
         if field.get("title") == "Price Range":
+
+            value = field.get(
+                "value"
+            ) or ""
+
             match = PRICE_RANGE_PATTERN.search(
-                field.get("value") or ""
+                value
             )
 
             if match:
+
                 return float(
-                    match.group(2).replace(",", "")
+                    match.group(2)
+                    .replace(",", "")
                 )
 
     return None
@@ -171,92 +328,237 @@ def parse_cut_off_price(
 
 def parse_subscription_times(
     bid_details: List[Dict],
-) -> Tuple[Optional[float], Optional[float]]:
+) -> Tuple[
+    Optional[float],
+    Optional[float],
+]:
+
     qib_multiple = None
     total_multiple = None
 
     for row in bid_details:
-        category = row.get("category", "")
-        times_str = row.get("noOfTime")
+
+        category = row.get(
+            "category",
+            "",
+        )
+
+        times_str = row.get(
+            "noOfTime"
+        )
 
         try:
-            times = float(times_str) if times_str else None
-        except (ValueError, TypeError):
+
+            times = (
+                float(times_str)
+                if times_str
+                else None
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+
             times = None
 
         if "QIB" in category.upper():
+
             qib_multiple = times
 
         elif category == "Total":
+
             total_multiple = times
 
-    return qib_multiple, total_multiple
+    return (
+        qib_multiple,
+        total_multiple,
+    )
 
 
-def parse_nse_date(date_str: str) -> datetime.date:
+def parse_nse_date(
+    date_str: str,
+) -> datetime.date:
+
     return datetime.datetime.strptime(
         date_str,
         "%d-%b-%Y",
     ).date()
 
 
-def get_qib_ipos(
-    min_lot_cost: float = 15000.0,
-    max_lot_cost: float = 20000.0,
-    min_qib_subscription: float = 10.0,
-) -> List[Dict]:
+# ============================================================
+# IPO PROCESSING
+# ============================================================
+
+def get_qib_ipos() -> Tuple[List[str], List[Dict]]:
 
     scraper = NSEIPOScraper()
 
-    active_issues = scraper.fetch_active_ipos()
+    active_issues = (
+        scraper.fetch_active_ipos()
+    )
 
-    today = datetime.date.today()
+    today = datetime.datetime.now(
+        INDIA_TIMEZONE
+    ).date()
+
+    print(
+        f"\nIndia date: {today}"
+    )
+
+    print(
+        f"Filters:"
+        f" Lot ₹{MIN_LOT_COST:,.0f}"
+        f" - ₹{MAX_LOT_COST:,.0f}"
+        f" | QIB >= {MIN_QIB_SUBSCRIPTION}x"
+    )
+
+    # --------------------------------------------------------
+    # Active IPO names
+    # --------------------------------------------------------
+
+    active_ipo_names = []
+
+    for issue in active_issues:
+
+        company_name = issue.get(
+            "companyName"
+        )
+
+        symbol = issue.get(
+            "symbol"
+        )
+
+        name = company_name or symbol
+
+        if name:
+            active_ipo_names.append(name)
+
+    # --------------------------------------------------------
+    # Qualified IPOs
+    # --------------------------------------------------------
 
     qualifying_ipos = []
 
-    print(f"Today: {today}")
-    print(f"Active IPOs found: {len(active_issues)}")
-
     for issue in active_issues:
-        symbol = issue.get("symbol")
-        series = issue.get("series", "")
-        start_date_str = issue.get("issueStartDate")
-        end_date_str = issue.get("issueEndDate")
 
-        if not symbol or not start_date_str or not end_date_str:
+        symbol = issue.get(
+            "symbol"
+        )
+
+        company_name = issue.get(
+            "companyName",
+            symbol,
+        )
+
+        series = issue.get(
+            "series",
+            "",
+        )
+
+        start_date_str = issue.get(
+            "issueStartDate"
+        )
+
+        end_date_str = issue.get(
+            "issueEndDate"
+        )
+
+        if not symbol:
+            continue
+
+        if not start_date_str:
+            continue
+
+        if not end_date_str:
             continue
 
         try:
-            end_date = parse_nse_date(end_date_str)
-        except ValueError:
-            print(
-                f"Invalid end date for {symbol}: "
-                f"{end_date_str}"
+
+            end_date = parse_nse_date(
+                end_date_str
             )
+
+        except ValueError:
+
+            print(
+                f"Invalid end date for "
+                f"{symbol}: {end_date_str}"
+            )
+
             continue
 
-        # Only process IPOs whose actual final day is today.
+        # ----------------------------------------------------
+        # Last day
+        # ----------------------------------------------------
+
         if today != end_date:
+
+            print(
+                f"Skipping {symbol}: "
+                f"ends on {end_date}"
+            )
+
             continue
 
-        print(f"\nChecking final-day IPO: {symbol}")
-
-        # Give NSE a small break between requests.
-        time.sleep(0.5)
-
-        issue_info_fields = scraper.fetch_issue_info(
-            symbol,
-            series,
+        print(
+            "\n"
+            + "=" * 50
         )
 
-        lot_size = parse_lot_size(issue_info_fields)
-        cut_off_price = parse_cut_off_price(
+        print(
+            f"Checking final-day IPO:"
+            f" {company_name}"
+        )
+
+        print(
+            f"Symbol: {symbol}"
+        )
+
+        # ----------------------------------------------------
+        # Issue information
+        # ----------------------------------------------------
+
+        time.sleep(0.5)
+
+        issue_info_fields = (
+            scraper.fetch_issue_info(
+                symbol,
+                series,
+            )
+        )
+
+        lot_size = parse_lot_size(
             issue_info_fields
         )
 
-        if not lot_size or not cut_off_price:
-            print("  Missing lot size or price.")
+        cut_off_price = (
+            parse_cut_off_price(
+                issue_info_fields
+            )
+        )
+
+        if not lot_size:
+
+            print(
+                f"❌ {symbol}: "
+                "Lot size unavailable."
+            )
+
             continue
+
+        if not cut_off_price:
+
+            print(
+                f"❌ {symbol}: "
+                "Cut-off price unavailable."
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Lot investment
+        # ----------------------------------------------------
 
         lot_investment = round(
             lot_size * cut_off_price,
@@ -264,50 +566,98 @@ def get_qib_ipos(
         )
 
         print(
-            f"  Lot: {lot_size} | "
-            f"Cut-off: ₹{cut_off_price} | "
-            f"Investment: ₹{lot_investment}"
-        )
-
-        if not (
-            min_lot_cost
-            <= lot_investment
-            <= max_lot_cost
-        ):
-            print("  ❌ Lot investment outside range.")
-            continue
-
-        time.sleep(0.5)
-
-        bid_details = scraper.fetch_bid_details(
-            symbol
-        )
-
-        qib_multiple, total_multiple = (
-            parse_subscription_times(bid_details)
+            f"Lot size: {lot_size}"
         )
 
         print(
-            f"  QIB: {qib_multiple}x | "
-            f"Total: {total_multiple}x"
+            f"Cut-off price:"
+            f" ₹{cut_off_price:,.2f}"
         )
 
-        if (
-            qib_multiple is None
-            or qib_multiple < min_qib_subscription
+        print(
+            f"Lot investment:"
+            f" ₹{lot_investment:,.2f}"
+        )
+
+        if not (
+            MIN_LOT_COST
+            <= lot_investment
+            <= MAX_LOT_COST
         ):
-            print("  ❌ QIB subscription below threshold.")
+
+            print(
+                f"❌ {symbol}: "
+                "Lot investment outside range."
+            )
+
             continue
 
-        print("  ✅ QUALIFIED")
+        print(
+            "✅ Lot investment passed."
+        )
+
+        # ----------------------------------------------------
+        # Subscription
+        # ----------------------------------------------------
+
+        time.sleep(0.5)
+
+        bid_details = (
+            scraper.fetch_bid_details(
+                symbol
+            )
+        )
+
+        qib_multiple, total_multiple = (
+            parse_subscription_times(
+                bid_details
+            )
+        )
+
+        print(
+            f"QIB: {qib_multiple}x"
+            if qib_multiple is not None
+            else "QIB: N/A"
+        )
+
+        print(
+            f"Total: {total_multiple}x"
+            if total_multiple is not None
+            else "Total: N/A"
+        )
+
+        if qib_multiple is None:
+
+            print(
+                f"❌ {symbol}: "
+                "QIB subscription unavailable."
+            )
+
+            continue
+
+        if qib_multiple < MIN_QIB_SUBSCRIPTION:
+
+            print(
+                f"❌ {symbol}: "
+                f"QIB {qib_multiple}x "
+                f"is below "
+                f"{MIN_QIB_SUBSCRIPTION}x."
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # QUALIFIED
+        # ----------------------------------------------------
+
+        print(
+            f"🎯 {symbol} QUALIFIED!"
+        )
 
         qualifying_ipos.append(
             {
                 "symbol": symbol,
-                "company_name": issue.get(
-                    "companyName",
-                    symbol,
-                ),
+                "company_name": company_name,
                 "series": series,
                 "issue_start_date": start_date_str,
                 "issue_end_date": end_date_str,
@@ -319,12 +669,39 @@ def get_qib_ipos(
             }
         )
 
-    return qualifying_ipos
+    return (
+        active_ipo_names,
+        qualifying_ipos,
+    )
 
 
-def send_telegram_message(message: str):
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def send_telegram_message(
+    message: str,
+):
+
+    bot_token = os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    )
+
+    chat_id = os.environ.get(
+        "TELEGRAM_CHAT_ID"
+    )
+
+    if not bot_token:
+
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is missing."
+        )
+
+    if not chat_id:
+
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID is missing."
+        )
 
     url = (
         f"https://api.telegram.org/"
@@ -337,73 +714,236 @@ def send_telegram_message(message: str):
             "chat_id": chat_id,
             "text": message,
         },
-        timeout=15,
+        timeout=20,
     )
 
-    response.raise_for_status()
+    print(
+        f"Telegram API response:"
+        f" {response.status_code}"
+    )
 
-    print("Telegram message sent successfully.")
+    if response.status_code != 200:
 
+        print(
+            response.text
+        )
+
+        response.raise_for_status()
+
+    data = response.json()
+
+    if not data.get("ok"):
+
+        raise RuntimeError(
+            f"Telegram error: {data}"
+        )
+
+    print(
+        "✅ Telegram message sent."
+    )
+
+
+# ============================================================
+# TELEGRAM MESSAGE
+# ============================================================
 
 def build_telegram_message(
-    ipos: List[Dict],
+    active_ipo_names: List[str],
+    qualifying_ipos: List[Dict],
 ) -> str:
 
+    today = datetime.datetime.now(
+        INDIA_TIMEZONE
+    ).strftime(
+        "%d %b %Y"
+    )
+
     lines = [
-        "🚨 IPO QIB ALERT",
+        "📊 IPO QIB TRACKER",
+        f"📅 {today}",
         "",
-        "Qualifying final-day IPOs:",
+        "━━━━━━━━━━━━━━━━━━",
+        "📋 ACTIVE IPOs",
+        "━━━━━━━━━━━━━━━━━━",
         "",
     ]
 
-    for ipo in ipos:
-        total = ipo["total_subscription_times"]
+    # --------------------------------------------------------
+    # Active IPO names only
+    # --------------------------------------------------------
 
-        total_text = (
-            f"{total}x"
-            if total is not None
-            else "N/A"
+    if active_ipo_names:
+
+        for name in active_ipo_names:
+
+            lines.append(
+                f"• {name}"
+            )
+
+    else:
+
+        lines.append(
+            "No active IPOs found."
         )
 
-        lines.extend(
-            [
-                f"🏢 {ipo['company_name']}",
-                f"📈 Symbol: {ipo['symbol']}",
-                f"📅 Issue: {ipo['issue_start_date']} → "
-                f"{ipo['issue_end_date']}",
-                f"📦 Lot Size: {ipo['lot_size']}",
-                f"💰 Cut-off: ₹"
-                f"{ipo['cut_off_price']:,.2f}",
-                f"💵 Lot Investment: ₹"
-                f"{ipo['lot_investment_amount']:,.2f}",
-                f"🏦 QIB Subscription: "
-                f"{ipo['qib_subscription_times']}x",
-                f"📊 Total Subscription: {total_text}",
-                "",
-                "────────────────────",
-                "",
+    # --------------------------------------------------------
+    # Qualified IPOs
+    # --------------------------------------------------------
+
+    lines.extend(
+        [
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "🎯 QUALIFIED IPOs",
+            "━━━━━━━━━━━━━━━━━━",
+            "",
+        ]
+    )
+
+    if not qualifying_ipos:
+
+        lines.append(
+            "No IPOs currently meet "
+            "the qualification criteria."
+        )
+
+    else:
+
+        for index, ipo in enumerate(
+            qualifying_ipos,
+            start=1,
+        ):
+
+            qib = ipo[
+                "qib_subscription_times"
             ]
-        )
+
+            total = ipo[
+                "total_subscription_times"
+            ]
+
+            qib_text = (
+                f"{qib}x"
+                if qib is not None
+                else "N/A"
+            )
+
+            total_text = (
+                f"{total}x"
+                if total is not None
+                else "N/A"
+            )
+
+            lines.extend(
+                [
+                    f"🏢 {ipo['company_name']}",
+                    f"📈 Symbol: {ipo['symbol']}",
+                    f"📊 Series: {ipo['series']}",
+                    "",
+                    f"📅 Issue:"
+                    f" {ipo['issue_start_date']}"
+                    f" → "
+                    f"{ipo['issue_end_date']}",
+                    "",
+                    f"📦 Lot Size:"
+                    f" {ipo['lot_size']}",
+                    f"💰 Cut-off:"
+                    f" ₹{ipo['cut_off_price']:,.2f}",
+                    f"💵 Lot Investment:"
+                    f" ₹{ipo['lot_investment_amount']:,.2f}",
+                    "",
+                    f"🏦 QIB:"
+                    f" {qib_text}",
+                    f"📊 Total:"
+                    f" {total_text}",
+                    "",
+                ]
+            )
+
+            if index < len(
+                qualifying_ipos
+            ):
+
+                lines.extend(
+                    [
+                        "──────────────────",
+                        "",
+                    ]
+                )
+
+    # --------------------------------------------------------
+    # Footer
+    # --------------------------------------------------------
+
+    lines.extend(
+        [
+            "",
+            "⚠️ Automated NSE tracker.",
+            "Verify subscription data before "
+            "making investment decisions.",
+        ]
+    )
 
     return "\n".join(lines)
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
-    print("Starting IPO QIB Tracker...")
 
-    ipos = get_qib_ipos()
+    print(
+        "🚀 Starting IPO QIB Tracker..."
+    )
 
-    if not ipos:
-        print("No qualifying IPOs found today.")
+    print(
+        "India time:",
+        datetime.datetime.now(
+            INDIA_TIMEZONE
+        ),
+    )
 
-        # Don't send Telegram messages when nothing qualifies.
-        return
+    # --------------------------------------------------------
+    # Fetch IPO data
+    # --------------------------------------------------------
 
-    message = build_telegram_message(ipos)
+    (
+        active_ipo_names,
+        qualifying_ipos,
+    ) = get_qib_ipos()
 
-    print("\n" + message)
+    print(
+        f"\nActive IPOs:"
+        f" {len(active_ipo_names)}"
+    )
 
-    send_telegram_message(message)
+    print(
+        f"Qualified IPOs:"
+        f" {len(qualifying_ipos)}"
+    )
+
+    # --------------------------------------------------------
+    # Build Telegram message
+    # --------------------------------------------------------
+
+    message = build_telegram_message(
+        active_ipo_names,
+        qualifying_ipos,
+    )
+
+    print(
+        "\n"
+        + message
+    )
+
+    # --------------------------------------------------------
+    # Always send Telegram
+    # --------------------------------------------------------
+
+    send_telegram_message(
+        message
+    )
 
 
 if __name__ == "__main__":
