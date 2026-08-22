@@ -1,6 +1,8 @@
 import datetime
+from email.message import EmailMessage
 import os
 import re
+import smtplib
 import time
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -268,8 +270,23 @@ class NSEIPOScraper:
 
 
 # ============================================================
-# PARSING
+# PARSING HELPERS
 # ============================================================
+
+def get_issue_info_field(
+    issue_info_fields: List[Dict],
+    target_titles: List[str],
+) -> Optional[str]:
+
+    for field in issue_info_fields:
+        title = field.get("title", "").strip()
+        for target in target_titles:
+            if target.lower() in title.lower():
+                val = field.get("value")
+                if val:
+                    return str(val).strip()
+    return None
+
 
 def parse_lot_size(
     issue_info_fields: List[Dict],
@@ -280,6 +297,7 @@ def parse_lot_size(
         if field.get("title") in (
             "Bid Lot",
             "Lot Size",
+            "Market Lot",
         ):
 
             value = field.get(
@@ -297,83 +315,76 @@ def parse_lot_size(
                     .replace(",", "")
                 )
 
+            digits = "".join(filter(str.isdigit, value))
+            if digits:
+                return int(digits)
+
     return None
 
 
-def parse_cut_off_price(
+def parse_price_info(
     issue_info_fields: List[Dict],
-) -> Optional[float]:
+) -> Tuple[Optional[str], Optional[float]]:
+
+    price_band_str = None
+    cut_off_price = None
 
     for field in issue_info_fields:
 
-        if field.get("title") == "Price Range":
+        title = field.get("title", "")
 
-            value = field.get(
-                "value"
-            ) or ""
+        if "Price" in title:
 
-            match = PRICE_RANGE_PATTERN.search(
-                value
-            )
+            value = field.get("value") or ""
+            price_band_str = value
+
+            match = PRICE_RANGE_PATTERN.search(value)
 
             if match:
-
-                return float(
-                    match.group(2)
-                    .replace(",", "")
+                cut_off_price = float(
+                    match.group(2).replace(",", "")
                 )
+            else:
+                numbers = re.findall(r"[\d,]+(?:\.\d+)?", value)
+                if numbers:
+                    cut_off_price = float(numbers[-1].replace(",", ""))
 
-    return None
+    return price_band_str, cut_off_price
 
 
-def parse_subscription_times(
+def parse_all_subscriptions(
     bid_details: List[Dict],
-) -> Tuple[
-    Optional[float],
-    Optional[float],
-]:
+) -> Dict[str, Optional[float]]:
 
-    qib_multiple = None
-    total_multiple = None
+    subs = {
+        "QIB": None,
+        "NII": None,
+        "Retail": None,
+        "Total": None,
+    }
 
     for row in bid_details:
 
-        category = row.get(
-            "category",
-            "",
-        )
-
-        times_str = row.get(
-            "noOfTime"
-        )
+        category = row.get("category", "")
+        times_str = row.get("noOfTime")
 
         try:
-
-            times = (
-                float(times_str)
-                if times_str
-                else None
-            )
-
-        except (
-            ValueError,
-            TypeError,
-        ):
-
+            times = float(times_str) if times_str else None
+        except (ValueError, TypeError):
             times = None
 
-        if "QIB" in category.upper():
+        cat_upper = category.upper()
 
-            qib_multiple = times
-
+        if "QIB" in cat_upper or "QUALIFIED INSTITUTIONAL" in cat_upper:
+            subs["QIB"] = times
+        elif "NON INSTITUTIONAL" in cat_upper or "NII" in cat_upper:
+            subs["NII"] = times
+        elif "RETAIL" in cat_upper or "INDIVIDUAL" in cat_upper:
+            subs["Retail"] = times
         elif category == "Total":
+            subs["Total"] = times
 
-            total_multiple = times
-
-    return (
-        qib_multiple,
-        total_multiple,
-    )
+    return subs
 
 
 def parse_nse_date(
@@ -390,361 +401,102 @@ def parse_nse_date(
 # IPO PROCESSING
 # ============================================================
 
-def get_qib_ipos() -> Tuple[List[str], List[Dict]]:
+def process_all_ipos() -> Tuple[List[str], List[Dict], List[Dict]]:
 
     scraper = NSEIPOScraper()
+    active_issues = scraper.fetch_active_ipos()
 
-    active_issues = (
-        scraper.fetch_active_ipos()
-    )
+    today = datetime.datetime.now(INDIA_TIMEZONE).date()
 
-    today = datetime.datetime.now(
-        INDIA_TIMEZONE
-    ).date()
-
+    print(f"\nIndia date: {today}")
     print(
-        f"\nIndia date: {today}"
+        f"Filters: Lot ₹{MIN_LOT_COST:,.0f} - ₹{MAX_LOT_COST:,.0f} "
+        f"| QIB >= {MIN_QIB_SUBSCRIPTION}x"
     )
-
-    print(
-        f"Filters:"
-        f" Lot ₹{MIN_LOT_COST:,.0f}"
-        f" - ₹{MAX_LOT_COST:,.0f}"
-        f" | QIB >= {MIN_QIB_SUBSCRIPTION}x"
-    )
-
-    # --------------------------------------------------------
-    # Active IPO names
-    # --------------------------------------------------------
 
     active_ipo_names = []
+    qualifying_ipos = []
+    all_detailed_ipos = []
 
     for issue in active_issues:
 
-        company_name = issue.get(
-            "companyName"
-        )
-
-        symbol = issue.get(
-            "symbol"
-        )
+        symbol = issue.get("symbol")
+        company_name = issue.get("companyName", symbol)
+        series = issue.get("series", "")
+        start_date_str = issue.get("issueStartDate")
+        end_date_str = issue.get("issueEndDate")
 
         name = company_name or symbol
-
         if name:
             active_ipo_names.append(name)
 
-    # --------------------------------------------------------
-    # Qualified IPOs
-    # --------------------------------------------------------
-
-    qualifying_ipos = []
-
-    for issue in active_issues:
-
-        symbol = issue.get(
-            "symbol"
-        )
-
-        company_name = issue.get(
-            "companyName",
-            symbol,
-        )
-
-        series = issue.get(
-            "series",
-            "",
-        )
-
-        start_date_str = issue.get(
-            "issueStartDate"
-        )
-
-        end_date_str = issue.get(
-            "issueEndDate"
-        )
-
-        if not symbol:
-            continue
-
-        if not start_date_str:
-            continue
-
-        if not end_date_str:
+        if not symbol or not start_date_str or not end_date_str:
             continue
 
         try:
-
-            end_date = parse_nse_date(
-                end_date_str
-            )
-
+            end_date = parse_nse_date(end_date_str)
+            is_final_day = (today == end_date)
         except ValueError:
-
-            print(
-                f"Invalid end date for "
-                f"{symbol}: {end_date_str}"
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # Last day
-        # ----------------------------------------------------
-
-        if today != end_date:
-
-            print(
-                f"Skipping {symbol}: "
-                f"ends on {end_date}"
-            )
-
-            continue
-
-        print(
-            "\n"
-            + "=" * 50
-        )
-
-        print(
-            f"Checking final-day IPO:"
-            f" {company_name}"
-        )
-
-        print(
-            f"Symbol: {symbol}"
-        )
-
-        # ----------------------------------------------------
-        # Issue information
-        # ----------------------------------------------------
+            end_date = None
+            is_final_day = False
 
         time.sleep(0.5)
-
-        issue_info_fields = (
-            scraper.fetch_issue_info(
-                symbol,
-                series,
-            )
-        )
-
-        lot_size = parse_lot_size(
-            issue_info_fields
-        )
-
-        cut_off_price = (
-            parse_cut_off_price(
-                issue_info_fields
-            )
-        )
-
-        if not lot_size:
-
-            print(
-                f"❌ {symbol}: "
-                "Lot size unavailable."
-            )
-
-            continue
-
-        if not cut_off_price:
-
-            print(
-                f"❌ {symbol}: "
-                "Cut-off price unavailable."
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # Lot investment
-        # ----------------------------------------------------
-
-        lot_investment = round(
-            lot_size * cut_off_price,
-            2,
-        )
-
-        print(
-            f"Lot size: {lot_size}"
-        )
-
-        print(
-            f"Cut-off price:"
-            f" ₹{cut_off_price:,.2f}"
-        )
-
-        print(
-            f"Lot investment:"
-            f" ₹{lot_investment:,.2f}"
-        )
-
-        if not (
-            MIN_LOT_COST
-            <= lot_investment
-            <= MAX_LOT_COST
-        ):
-
-            print(
-                f"❌ {symbol}: "
-                "Lot investment outside range."
-            )
-
-            continue
-
-        print(
-            "✅ Lot investment passed."
-        )
-
-        # ----------------------------------------------------
-        # Subscription
-        # ----------------------------------------------------
-
+        issue_info_fields = scraper.fetch_issue_info(symbol, series)
         time.sleep(0.5)
+        bid_details = scraper.fetch_bid_details(symbol)
 
-        bid_details = (
-            scraper.fetch_bid_details(
-                symbol
-            )
-        )
+        lot_size = parse_lot_size(issue_info_fields)
+        price_band, cut_off_price = parse_price_info(issue_info_fields)
+        subs = parse_all_subscriptions(bid_details)
 
-        qib_multiple, total_multiple = (
-            parse_subscription_times(
-                bid_details
-            )
-        )
+        issue_size = get_issue_info_field(
+            issue_info_fields,
+            ["Issue Size", "Issue Amount", "Total Issue"],
+        ) or issue.get("issueSize", "N/A")
 
-        print(
-            f"QIB: {qib_multiple}x"
-            if qib_multiple is not None
-            else "QIB: N/A"
-        )
+        listing_date = get_issue_info_field(
+            issue_info_fields,
+            ["Listing Date", "Tentative Listing Date"],
+        ) or "N/A"
 
-        print(
-            f"Total: {total_multiple}x"
-            if total_multiple is not None
-            else "Total: N/A"
-        )
+        lot_investment = None
+        if lot_size and cut_off_price:
+            lot_investment = round(lot_size * cut_off_price, 2)
 
-        if qib_multiple is None:
+        ipo_record = {
+            "symbol": symbol,
+            "company_name": company_name,
+            "series": series,
+            "issue_start_date": start_date_str,
+            "issue_end_date": end_date_str,
+            "is_final_day": is_final_day,
+            "price_band": price_band or "N/A",
+            "cut_off_price": cut_off_price,
+            "lot_size": lot_size,
+            "lot_investment_amount": lot_investment,
+            "issue_size": issue_size,
+            "listing_date": listing_date,
+            "qib_subscription_times": subs["QIB"],
+            "nii_subscription_times": subs["NII"],
+            "retail_subscription_times": subs["Retail"],
+            "total_subscription_times": subs["Total"],
+        }
 
-            print(
-                f"❌ {symbol}: "
-                "QIB subscription unavailable."
-            )
+        all_detailed_ipos.append(ipo_record)
 
-            continue
+        # Telegram Qualification Check (Final Day + Lot Cost + QIB >= 10x)
+        if is_final_day and lot_investment and subs["QIB"] is not None:
+            if (
+                MIN_LOT_COST <= lot_investment <= MAX_LOT_COST
+                and subs["QIB"] >= MIN_QIB_SUBSCRIPTION
+            ):
+                qualifying_ipos.append(ipo_record)
 
-        if qib_multiple < MIN_QIB_SUBSCRIPTION:
-
-            print(
-                f"❌ {symbol}: "
-                f"QIB {qib_multiple}x "
-                f"is below "
-                f"{MIN_QIB_SUBSCRIPTION}x."
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # QUALIFIED
-        # ----------------------------------------------------
-
-        print(
-            f"🎯 {symbol} QUALIFIED!"
-        )
-
-        qualifying_ipos.append(
-            {
-                "symbol": symbol,
-                "company_name": company_name,
-                "series": series,
-                "issue_start_date": start_date_str,
-                "issue_end_date": end_date_str,
-                "lot_size": lot_size,
-                "cut_off_price": cut_off_price,
-                "lot_investment_amount": lot_investment,
-                "qib_subscription_times": qib_multiple,
-                "total_subscription_times": total_multiple,
-            }
-        )
-
-    return (
-        active_ipo_names,
-        qualifying_ipos,
-    )
+    return active_ipo_names, qualifying_ipos, all_detailed_ipos
 
 
 # ============================================================
-# TELEGRAM
-# ============================================================
-
-def send_telegram_message(
-    message: str,
-):
-
-    bot_token = os.environ.get(
-        "TELEGRAM_BOT_TOKEN"
-    )
-
-    chat_id = os.environ.get(
-        "TELEGRAM_CHAT_ID"
-    )
-
-    if not bot_token:
-
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is missing."
-        )
-
-    if not chat_id:
-
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID is missing."
-        )
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{bot_token}/sendMessage"
-    )
-
-    response = requests.post(
-        url,
-        json={
-            "chat_id": chat_id,
-            "text": message,
-        },
-        timeout=20,
-    )
-
-    print(
-        f"Telegram API response:"
-        f" {response.status_code}"
-    )
-
-    if response.status_code != 200:
-
-        print(
-            response.text
-        )
-
-        response.raise_for_status()
-
-    data = response.json()
-
-    if not data.get("ok"):
-
-        raise RuntimeError(
-            f"Telegram error: {data}"
-        )
-
-    print(
-        "✅ Telegram message sent."
-    )
-
-
-# ============================================================
-# TELEGRAM MESSAGE
+# TELEGRAM BUILDER & SENDER (UNCHANGED)
 # ============================================================
 
 def build_telegram_message(
@@ -768,27 +520,11 @@ def build_telegram_message(
         "",
     ]
 
-    # --------------------------------------------------------
-    # Active IPO names only
-    # --------------------------------------------------------
-
     if active_ipo_names:
-
         for name in active_ipo_names:
-
-            lines.append(
-                f"• {name}"
-            )
-
+            lines.append(f"• {name}")
     else:
-
-        lines.append(
-            "No active IPOs found."
-        )
-
-    # --------------------------------------------------------
-    # Qualified IPOs
-    # --------------------------------------------------------
+        lines.append("No active IPOs found.")
 
     lines.extend(
         [
@@ -801,38 +537,16 @@ def build_telegram_message(
     )
 
     if not qualifying_ipos:
-
         lines.append(
-            "No IPOs currently meet "
-            "the qualification criteria."
+            "No IPOs currently meet the qualification criteria."
         )
-
     else:
+        for index, ipo in enumerate(qualifying_ipos, start=1):
+            qib = ipo["qib_subscription_times"]
+            total = ipo["total_subscription_times"]
 
-        for index, ipo in enumerate(
-            qualifying_ipos,
-            start=1,
-        ):
-
-            qib = ipo[
-                "qib_subscription_times"
-            ]
-
-            total = ipo[
-                "total_subscription_times"
-            ]
-
-            qib_text = (
-                f"{qib}x"
-                if qib is not None
-                else "N/A"
-            )
-
-            total_text = (
-                f"{total}x"
-                if total is not None
-                else "N/A"
-            )
+            qib_text = f"{qib}x" if qib is not None else "N/A"
+            total_text = f"{total}x" if total is not None else "N/A"
 
             lines.extend(
                 [
@@ -840,51 +554,141 @@ def build_telegram_message(
                     f"📈 Symbol: {ipo['symbol']}",
                     f"📊 Series: {ipo['series']}",
                     "",
-                    f"📅 Issue:"
-                    f" {ipo['issue_start_date']}"
-                    f" → "
-                    f"{ipo['issue_end_date']}",
+                    f"📅 Issue: {ipo['issue_start_date']} → {ipo['issue_end_date']}",
                     "",
-                    f"📦 Lot Size:"
-                    f" {ipo['lot_size']}",
-                    f"💰 Cut-off:"
-                    f" ₹{ipo['cut_off_price']:,.2f}",
-                    f"💵 Lot Investment:"
-                    f" ₹{ipo['lot_investment_amount']:,.2f}",
+                    f"📦 Lot Size: {ipo['lot_size']}",
+                    f"💰 Cut-off: ₹{ipo['cut_off_price']:,.2f}",
+                    f"💵 Lot Investment: ₹{ipo['lot_investment_amount']:,.2f}",
                     "",
-                    f"🏦 QIB:"
-                    f" {qib_text}",
-                    f"📊 Total:"
-                    f" {total_text}",
+                    f"🏦 QIB: {qib_text}",
+                    f"📊 Total: {total_text}",
                     "",
                 ]
             )
 
-            if index < len(
-                qualifying_ipos
-            ):
-
-                lines.extend(
-                    [
-                        "──────────────────",
-                        "",
-                    ]
-                )
-
-    # --------------------------------------------------------
-    # Footer
-    # --------------------------------------------------------
+            if index < len(qualifying_ipos):
+                lines.extend(["──────────────────", ""])
 
     lines.extend(
         [
             "",
             "⚠️ Automated NSE tracker.",
-            "Verify subscription data before "
-            "making investment decisions.",
+            "Verify subscription data before making investment decisions.",
         ]
     )
 
     return "\n".join(lines)
+
+
+def send_telegram_message(message: str):
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    if not bot_token or not chat_id:
+        raise RuntimeError("Telegram credentials missing in environment.")
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    response = requests.post(
+        url,
+        json={"chat_id": chat_id, "text": message},
+        timeout=20,
+    )
+
+    if response.status_code != 200:
+        response.raise_for_status()
+
+    print("✅ Telegram message sent.")
+
+
+# ============================================================
+# EMAIL BUILDER (RICH DETAILS FOR GEMINI) & SENDER
+# ============================================================
+
+def build_email_message(all_detailed_ipos: List[Dict]) -> str:
+
+    today_str = datetime.datetime.now(INDIA_TIMEZONE).strftime("%d %b %Y, %I:%M %p IST")
+
+    lines = [
+        f"NSE IPO COMPREHENSIVE MARKET REPORT - {today_str}",
+        "============================================================",
+        "",
+    ]
+
+    if not all_detailed_ipos:
+        lines.append("No active IPO data available.")
+        return "\n".join(lines)
+
+    for index, ipo in enumerate(all_detailed_ipos, start=1):
+
+        qib = ipo["qib_subscription_times"]
+        nii = ipo["nii_subscription_times"]
+        retail = ipo["retail_subscription_times"]
+        total = ipo["total_subscription_times"]
+        lot_inv = ipo["lot_investment_amount"]
+
+        qib_str = f"{qib}x" if qib is not None else "N/A"
+        nii_str = f"{nii}x" if nii is not None else "N/A"
+        retail_str = f"{retail}x" if retail is not None else "N/A"
+        total_str = f"{total}x" if total is not None else "N/A"
+        lot_inv_str = f"₹{lot_inv:,.2f}" if lot_inv else "N/A"
+        cutoff_str = f"₹{ipo['cut_off_price']:,.2f}" if ipo["cut_off_price"] else "N/A"
+
+        # Evaluation criteria checks
+        qib_pass = "YES" if (qib is not None and qib >= MIN_QIB_SUBSCRIPTION) else "NO"
+        cost_pass = "YES" if (lot_inv and MIN_LOT_COST <= lot_inv <= MAX_LOT_COST) else "NO"
+        final_day_pass = "YES" if ipo["is_final_day"] else "NO"
+
+        lines.extend(
+            [
+                f"[{index}] COMPANY: {ipo['company_name']}",
+                f"• Symbol / Series: {ipo['symbol']} / {ipo['series']}",
+                f"• Price Band: {ipo['price_band']}",
+                f"• Cut-off / Issue Price: {cutoff_str}",
+                f"• Market Lot: {ipo['lot_size']} Equity Shares",
+                f"• Minimum Lot Cost (Retail): {lot_inv_str}",
+                f"• Issue Size: {ipo['issue_size']}",
+                f"• Bidding Period: {ipo['issue_start_date']} to {ipo['issue_end_date']}",
+                f"• Final Day to Bid Today: {final_day_pass}",
+                f"• Tentative Listing Date: {ipo['listing_date']}",
+                "",
+                "  SUBSCRIPTION BREAKDOWN:",
+                f"  - QIB Subscription: {qib_str}",
+                f"  - NII / HNI Subscription: {nii_str}",
+                f"  - Retail (RII) Subscription: {retail_str}",
+                f"  - Total Subscription: {total_str}",
+                "",
+                "  CRITERIA VERIFICATION:",
+                f"  - QIB >= 10x: {qib_pass} ({qib_str})",
+                f"  - Retail Lot between ₹15k - ₹20k: {cost_pass} ({lot_inv_str})",
+                f"  - Final Day to Bid: {final_day_pass}",
+                "------------------------------------------------------------",
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def send_email_message(message: str):
+
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_app_password = os.environ.get("GMAIL_APP_PASSWORD")
+
+    if not gmail_user or not gmail_app_password:
+        raise RuntimeError("GMAIL_USER or GMAIL_APP_PASSWORD missing in environment.")
+
+    msg = EmailMessage()
+    msg["Subject"] = "[NSE QIB] Daily Market Data"
+    msg["From"] = gmail_user
+    msg["To"] = gmail_user
+    msg.set_content(message)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(gmail_user, gmail_app_password)
+        smtp.send_message(msg)
+
+    print("✅ Full IPO report email sent to Gmail.")
 
 
 # ============================================================
@@ -893,57 +697,24 @@ def build_telegram_message(
 
 def main():
 
-    print(
-        "🚀 Starting IPO QIB Tracker..."
-    )
+    print("🚀 Starting IPO QIB Tracker...")
+    print("India time:", datetime.datetime.now(INDIA_TIMEZONE))
 
-    print(
-        "India time:",
-        datetime.datetime.now(
-            INDIA_TIMEZONE
-        ),
-    )
+    # Process all active IPOs
+    active_ipo_names, qualifying_ipos, all_detailed_ipos = process_all_ipos()
 
-    # --------------------------------------------------------
-    # Fetch IPO data
-    # --------------------------------------------------------
+    print(f"\nActive IPOs: {len(active_ipo_names)}")
+    print(f"Qualified IPOs: {len(qualifying_ipos)}")
 
-    (
-        active_ipo_names,
-        qualifying_ipos,
-    ) = get_qib_ipos()
+    # 1. Build and send Telegram message (unchanged format)
+    telegram_msg = build_telegram_message(active_ipo_names, qualifying_ipos)
+    print("\n--- TELEGRAM MESSAGE ---\n" + telegram_msg)
+    send_telegram_message(telegram_msg)
 
-    print(
-        f"\nActive IPOs:"
-        f" {len(active_ipo_names)}"
-    )
-
-    print(
-        f"Qualified IPOs:"
-        f" {len(qualifying_ipos)}"
-    )
-
-    # --------------------------------------------------------
-    # Build Telegram message
-    # --------------------------------------------------------
-
-    message = build_telegram_message(
-        active_ipo_names,
-        qualifying_ipos,
-    )
-
-    print(
-        "\n"
-        + message
-    )
-
-    # --------------------------------------------------------
-    # Always send Telegram
-    # --------------------------------------------------------
-
-    send_telegram_message(
-        message
-    )
+    # 2. Build and send Rich Email for Gemini Scheduled Action
+    email_msg = build_email_message(all_detailed_ipos)
+    print("\n--- GMAIL MESSAGE ---\n" + email_msg)
+    send_email_message(email_msg)
 
 
 if __name__ == "__main__":

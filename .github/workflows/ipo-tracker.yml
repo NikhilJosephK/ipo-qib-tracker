@@ -2,8 +2,8 @@ name: IPO QIB Tracker
 
 on:
   schedule:
-    # 4:00 PM IST, Monday-Friday
-    - cron: "30 10 * * 1-5"
+    # 2:00 PM IST (8:30 AM UTC), Monday-Friday
+    - cron: "30 8 * * 1-5"
 
   # Allows you to manually run the workflow
   workflow_dispatch:
@@ -30,5 +30,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           python tracker.py
