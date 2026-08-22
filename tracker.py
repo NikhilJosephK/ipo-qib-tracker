@@ -14,7 +14,6 @@ import requests
 # CONFIG
 # ============================================================
 
-MIN_LOT_COST = 15000.0
 MAX_LOT_COST = 20000.0
 MIN_QIB_SUBSCRIPTION = 10.0
 
@@ -400,7 +399,7 @@ def process_all_ipos() -> Tuple[List[str], List[Dict], List[Dict]]:
 
     print(f"\nIndia date: {today}")
     print(
-        f"Filters: Lot ₹{MIN_LOT_COST:,.0f} - ₹{MAX_LOT_COST:,.0f} "
+        f"Filters: Lot <= ₹{MAX_LOT_COST:,.0f} "
         f"| QIB >= {MIN_QIB_SUBSCRIPTION}x"
     )
 
@@ -476,7 +475,7 @@ def process_all_ipos() -> Tuple[List[str], List[Dict], List[Dict]]:
 
         if is_final_day and lot_investment and subs["QIB"] is not None:
             if (
-                MIN_LOT_COST <= lot_investment <= MAX_LOT_COST
+                lot_investment <= MAX_LOT_COST
                 and subs["QIB"] >= MIN_QIB_SUBSCRIPTION
             ):
                 qualifying_ipos.append(ipo_record)
@@ -624,7 +623,7 @@ def build_email_message(all_detailed_ipos: List[Dict]) -> str:
         cutoff_str = f"₹{ipo['cut_off_price']:,.2f}" if ipo["cut_off_price"] else "N/A"
 
         qib_pass = "YES" if (qib is not None and qib >= MIN_QIB_SUBSCRIPTION) else "NO"
-        cost_pass = "YES" if (lot_inv and MIN_LOT_COST <= lot_inv <= MAX_LOT_COST) else "NO"
+        cost_pass = "YES" if (lot_inv and lot_inv <= MAX_LOT_COST) else "NO"
         final_day_pass = "YES" if ipo["is_final_day"] else "NO"
 
         lines.extend(
@@ -648,7 +647,7 @@ def build_email_message(all_detailed_ipos: List[Dict]) -> str:
                 "",
                 "  CRITERIA VERIFICATION:",
                 f"  - QIB >= 10x: {qib_pass} ({qib_str})",
-                f"  - Retail Lot between ₹15k - ₹20k: {cost_pass} ({lot_inv_str})",
+                f"  - Retail Lot <= ₹20k: {cost_pass} ({lot_inv_str})",
                 f"  - Final Day to Bid: {final_day_pass}",
                 "------------------------------------------------------------",
                 "",
