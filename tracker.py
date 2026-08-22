@@ -270,7 +270,7 @@ class NSEIPOScraper:
 
 
 # ============================================================
-# PARSING HELPERS
+# PARSING HELPERS (NULL-SAFE)
 # ============================================================
 
 def get_issue_info_field(
@@ -279,11 +279,11 @@ def get_issue_info_field(
 ) -> Optional[str]:
 
     for field in issue_info_fields:
-        title = field.get("title", "").strip()
+        title = str(field.get("title") or "").strip()
         for target in target_titles:
             if target.lower() in title.lower():
                 val = field.get("value")
-                if val:
+                if val is not None:
                     return str(val).strip()
     return None
 
@@ -293,26 +293,19 @@ def parse_lot_size(
 ) -> Optional[int]:
 
     for field in issue_info_fields:
+        title = str(field.get("title") or "").strip()
 
-        if field.get("title") in (
+        if title in (
             "Bid Lot",
             "Lot Size",
             "Market Lot",
         ):
+            value = str(field.get("value") or "")
 
-            value = field.get(
-                "value"
-            ) or ""
-
-            match = LOT_SIZE_PATTERN.search(
-                value
-            )
-
+            match = LOT_SIZE_PATTERN.search(value)
             if match:
-
                 return int(
-                    match.group(1)
-                    .replace(",", "")
+                    match.group(1).replace(",", "")
                 )
 
             digits = "".join(filter(str.isdigit, value))
@@ -330,24 +323,22 @@ def parse_price_info(
     cut_off_price = None
 
     for field in issue_info_fields:
-
-        title = field.get("title", "")
+        title = str(field.get("title") or "").strip()
 
         if "Price" in title:
+            value = str(field.get("value") or "").strip()
+            if value:
+                price_band_str = value
 
-            value = field.get("value") or ""
-            price_band_str = value
-
-            match = PRICE_RANGE_PATTERN.search(value)
-
-            if match:
-                cut_off_price = float(
-                    match.group(2).replace(",", "")
-                )
-            else:
-                numbers = re.findall(r"[\d,]+(?:\.\d+)?", value)
-                if numbers:
-                    cut_off_price = float(numbers[-1].replace(",", ""))
+                match = PRICE_RANGE_PATTERN.search(value)
+                if match:
+                    cut_off_price = float(
+                        match.group(2).replace(",", "")
+                    )
+                else:
+                    numbers = re.findall(r"[\d,]+(?:\.\d+)?", value)
+                    if numbers:
+                        cut_off_price = float(numbers[-1].replace(",", ""))
 
     return price_band_str, cut_off_price
 
@@ -364,8 +355,7 @@ def parse_all_subscriptions(
     }
 
     for row in bid_details:
-
-        category = row.get("category", "")
+        category = str(row.get("category") or "").strip()
         times_str = row.get("noOfTime")
 
         try:
@@ -484,7 +474,6 @@ def process_all_ipos() -> Tuple[List[str], List[Dict], List[Dict]]:
 
         all_detailed_ipos.append(ipo_record)
 
-        # Telegram Qualification Check (Final Day + Lot Cost + QIB >= 10x)
         if is_final_day and lot_investment and subs["QIB"] is not None:
             if (
                 MIN_LOT_COST <= lot_investment <= MAX_LOT_COST
@@ -496,7 +485,7 @@ def process_all_ipos() -> Tuple[List[str], List[Dict], List[Dict]]:
 
 
 # ============================================================
-# TELEGRAM BUILDER & SENDER (UNCHANGED)
+# TELEGRAM BUILDER & SENDER
 # ============================================================
 
 def build_telegram_message(
@@ -602,7 +591,7 @@ def send_telegram_message(message: str):
 
 
 # ============================================================
-# EMAIL BUILDER (RICH DETAILS FOR GEMINI) & SENDER
+# EMAIL BUILDER (FOR GEMINI) & SENDER
 # ============================================================
 
 def build_email_message(all_detailed_ipos: List[Dict]) -> str:
@@ -634,7 +623,6 @@ def build_email_message(all_detailed_ipos: List[Dict]) -> str:
         lot_inv_str = f"₹{lot_inv:,.2f}" if lot_inv else "N/A"
         cutoff_str = f"₹{ipo['cut_off_price']:,.2f}" if ipo["cut_off_price"] else "N/A"
 
-        # Evaluation criteria checks
         qib_pass = "YES" if (qib is not None and qib >= MIN_QIB_SUBSCRIPTION) else "NO"
         cost_pass = "YES" if (lot_inv and MIN_LOT_COST <= lot_inv <= MAX_LOT_COST) else "NO"
         final_day_pass = "YES" if ipo["is_final_day"] else "NO"
@@ -700,18 +688,17 @@ def main():
     print("🚀 Starting IPO QIB Tracker...")
     print("India time:", datetime.datetime.now(INDIA_TIMEZONE))
 
-    # Process all active IPOs
     active_ipo_names, qualifying_ipos, all_detailed_ipos = process_all_ipos()
 
     print(f"\nActive IPOs: {len(active_ipo_names)}")
     print(f"Qualified IPOs: {len(qualifying_ipos)}")
 
-    # 1. Build and send Telegram message (unchanged format)
+    # 1. Telegram Dispatch
     telegram_msg = build_telegram_message(active_ipo_names, qualifying_ipos)
     print("\n--- TELEGRAM MESSAGE ---\n" + telegram_msg)
     send_telegram_message(telegram_msg)
 
-    # 2. Build and send Rich Email for Gemini Scheduled Action
+    # 2. Email Dispatch
     email_msg = build_email_message(all_detailed_ipos)
     print("\n--- GMAIL MESSAGE ---\n" + email_msg)
     send_email_message(email_msg)
